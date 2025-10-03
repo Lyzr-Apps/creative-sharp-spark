@@ -1,4 +1,11 @@
 import React, { useState, useEffect } from 'react'
+import parseLLMJson from './utils/jsonParser'
+
+interface AgentResponse {
+  result: any
+  confidence: number
+  metadata: any
+}
 
 interface ScenarioData {
   scenario_summary: string
@@ -25,87 +32,9 @@ interface CreditCalculation {
   warnings: string[]
 }
 
-// Client-side agent simulation
-const scenarioParserAgent = (businessIdea: string): any => {
-  // Simulate agent parsing business scenario
-  return {
-    result: {
-      scenario_summary: `AI automation for: ${businessIdea.substring(0, 50)}${businessIdea.length > 50 ? '...' : ''}`,
-      questions_asked: ['What is your unit of work?', 'How many per month?'],
-      user_responses: [],
-      defaults_applied: {}
-    },
-    confidence: 0.95,
-    metadata: {
-      processing_time: '0.2s',
-      validation_status: 'valid'
-    }
-  }
-}
-
-const creditCalculatorAgent = (message: string): any => {
-  // Extract key information from message for calculation
-  const monthlyCount = parseInt(message.match(/\d+/g)?.find(num => parseInt(num) > 0) || '10000') || 10000
-  const extractedUnitCount = parseInt(message.match(/\d+/g)?.find((num, index) => index > 0 && parseInt(num) > 0) || '1') || 1
-
-  // Client-side credit calculation logic
-  const perUnitCredits = Math.max(1, Math.min(50, Math.floor(monthlyCount / 1000))) // 1-50 credits per unit
-  const monthlyTotalLight = Math.floor(monthlyCount * perUnitCredits * 0.95) // 95% efficiency for light
-  const monthlyTotalHeavy = Math.floor(monthlyCount * perUnitCredits * 1.1)   // 110% efficiency for heavy
-
-  const dollar_cost_light = (monthlyTotalLight * 0.02).toFixed(2) // $0.02 per credit
-  const dollar_cost_heavy = (monthlyTotalHeavy * 0.02).toFixed(2)
-
-  // Legacy pricing (100x current)
-  const legacy_comparison_light = monthlyTotalLight * 100
-  const legacy_comparison_heavy = monthlyTotalHeavy * 100
-
-  // Generate warnings based on limits
-  const warnings: string[] = []
-  if (extractedUnitCount >= 1000000) {
-    warnings.push('WARNING: Extreme token usage (≥1M tokens per unit) detected')
-  }
-  if (Math.floor(monthlyCount / extractedUnitCount) > 20) {
-    warnings.push('WARNING: High call frequency detected (>20 calls)')
-  }
-  if (monthlyCount > 50000) {
-    warnings.push('NOTE: Large monthly volume, consider optimization')
-  }
-
-  return {
-    result: {
-      summary: {
-        light_scenario: `${monthlyTotalLight.toLocaleString()} credits / $${dollar_cost_light}`,
-        heavy_scenario: `${monthlyTotalHeavy.toLocaleString()} credits / $${dollar_cost_heavy}`
-      },
-      calculations: {
-        per_unit_credits: perUnitCredits,
-        monthly_total_light: monthlyTotalLight,
-        monthly_total_heavy: monthlyTotalHeavy,
-        dollar_cost_light: parseFloat(dollar_cost_light),
-        dollar_cost_heavy: parseFloat(dollar_cost_heavy),
-        legacy_comparison_light,
-        legacy_comparison_heavy
-      },
-      assumptions: [
-        `Processing ${monthlyCount.toLocaleString()} ${message.includes('customer support') ? 'email responses' : 'units'} per month`,
-        `Unit complexity: ${extractedUnitCount.toLocaleString()} tokens per unit`,
-        `Average ${perUnitCredits} agent-action credits per unit`,
-        `Efficiency: 95% (light) / 110% (heavy) for processing variance`,
-        'AI model token costs not included'
-      ],
-      warnings
-    },
-    confidence: 0.92,
-    metadata: {
-      processing_time: '0.3s',
-      calculation_basis: 'Client-side simulation'
-    }
-  }
-}
-
+// Sequential agent processing with proper JSON parsing
 function App() {
-  const [currentStep, setCurrentStep] = useState<'idea' | 'unit' | 'count' | 'results'>('idea')
+  const [currentStep, setCurrentStep] = useState<'idea' | 'processing' | 'unit' | 'count' | 'results'>('idea')
   const [businessIdea, setBusinessIdea] = useState('')
   const [unitOfWork, setUnitOfWork] = useState('')
   const [monthlyCount, setMonthlyCount] = useState('')
@@ -117,48 +46,73 @@ function App() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  // Load last calculation from localStorage on mount
-  useEffect(() => {
-    const savedCalculation = localStorage.getItem('lyzr-last-calculation')
-    const savedFormData = localStorage.getItem('lyzr-form-data')
+  // Sequential agent calls with proper JSON parsing
+  const callAgent = async (agentId: string, message: string): Promise<AgentResponse | null> => {
+    const userId = `user-${Math.random().toString(36).substr(2, 9)}@app.com`
+    const sessionId = `${agentId}-${Math.random().toString(36).substr(2, 12)}`
 
-    if (savedCalculation) {
-      try {
-        const parsed = JSON.parse(savedCalculation)
-        setCreditData(parsed)
-        setCurrentStep('results')
-      } catch (e) {
-        localStorage.removeItem('lyzr-last-calculation')
+    try {
+      setCurrentStep('processing')
+
+      const response = await fetch('https://agent-prod.studio.lyzr.ai/v3/inference/chat/', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': 'sk-default-obhGvAo6gG9YT9tu6ChjyXLqnw7TxSGY'
+        },
+        body: JSON.stringify({
+          user_id: userId,
+          agent_id: agentId,
+          session_id: sessionId,
+          message: message
+        })
+      })
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`)
       }
-    }
 
-    if (savedFormData) {
-      try {
-        const parsed = JSON.parse(savedFormData)
-        setBusinessIdea(parsed.businessIdea || '')
-        setUnitOfWork(parsed.unitOfWork || '')
-        setMonthlyCount(parsed.monthlyCount || '')
-      } catch (e) {
-        localStorage.removeItem('lyzr-form-data')
+      const text = await response.text()
+      const parsed = parseLLMJson(text)
+
+      if (!parsed) {
+        throw new Error('Failed to parse agent response')
       }
-    }
-  }, [])
 
+      return {
+        result: parsed.result || parsed,
+        confidence: parsed.confidence || 0,
+        metadata: parsed.metadata || {}
+      }
+    } catch (error) {
+      console.error('Agent call failed:', error)
+      setError('An error occurred contacting the agent')
+      return null
+    }
+  }
+
+  // Sequential agent processing
   const processBusinessIdea = async () => {
     if (!businessIdea.trim()) return
 
     setLoading(true)
     setError(null)
+    setCurrentStep('processing')
 
     try {
-      // Simulate API call delay
-      await new Promise(resolve => setTimeout(resolve, 800))
+      // Step 1: Call ScenarioParser to analyze the business idea
+      const scenarioResponse = await callAgent('68e01d2cf40da92f699a9501', businessIdea)
 
-      const response = scenarioParserAgent(businessIdea)
-      setScenarioData(response.result)
+      if (!scenarioResponse?.result) {
+        throw new Error('Failed to process business scenario')
+      }
+
+      setScenarioData(scenarioResponse.result)
       setCurrentStep('unit')
+
     } catch (err) {
-      setError('Failed to process business idea')
+      setError(err instanceof Error ? err.message : 'Failed to process business idea')
+      setCurrentStep('idea')
     } finally {
       setLoading(false)
     }
@@ -170,61 +124,37 @@ function App() {
     setLoading(true)
     setError(null)
 
-    // Store form data for persistence
-    localStorage.setItem('lyzr-form-data', JSON.stringify({
-      businessIdea,
-      unitOfWork,
-      monthlyCount
-    }))
-
     const calculatorMessage = `
-      Calculate estimated credit usage for:
-      - Business idea: ${businessIdea}
-      - Unit of work: ${unitOfWork}
-      - Monthly count: ${monthlyCount}
+      Business idea: ${businessIdea}
+      Unit of work: ${unitOfWork}
+      Monthly count: ${monthlyCount}
+      ${scenarioData ? `Defaults applied: ${JSON.stringify(scenarioData.defaultsApplied)}` : ''}
     `
 
     try {
-      // Simulate API call delay
-      await new Promise(resolve => setTimeout(resolve, 1000))
+      // Step 2: Call CreditCalculator with parsed scenario data
+      const creditResponse = await callAgent('68e01d3a010a31eba98903e5', calculatorMessage)
 
-      const response = creditCalculatorAgent(calculatorMessage)
-      setCreditData(response.result)
+      if (!creditResponse?.result) {
+        throw new Error('Failed to calculate credits')
+      }
 
-      // Store calculation for follow-up requests
-      localStorage.setItem('lyzr-last-calculation', JSON.stringify(response.result))
-
+      setCreditData(creditResponse.result)
       setCurrentStep('results')
+
     } catch (err) {
-      setError('Failed to calculate credits')
+      setError(err instanceof Error ? err.message : 'Failed to calculate credits')
     } finally {
       setLoading(false)
     }
   }
 
-  const resetForm = () => {
-    setCurrentStep('idea')
-    setBusinessIdea('')
-    setUnitOfWork('')
-    setMonthlyCount('')
-    setScenarioData(null)
-    setCreditData(null)
-    setShowLightDetails(false)
-    setShowHeavyDetails(false)
-    setShowComparison(false)
-    setError(null)
-
-    // Clear stored data
-    localStorage.removeItem('lyzr-last-calculation')
-    localStorage.removeItem('lyzr-form-data')
-  }
-
-  if (loading) {
+  if (loading || currentStep === 'processing') {
     return (
       <div className="min-h-screen flex items-center justify-center" style={{ backgroundColor: '#F8F9FB' }}>
         <div className="text-center">
           <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
-          <p className="text-lg" style={{ color: '#202124' }}>Processing your request...</p>
+          <p className="text-lg" style={{ color: '#202124' }}>Processing your request with Lyzr agents...</p>
         </div>
       </div>
     )
@@ -240,7 +170,7 @@ function App() {
 
       {/* Main Content */}
       <main className="flex-1 px-4 py-8 max-w-4xl mx-auto w-full">
-        {currentStep === 'idea' && (
+        {currentStep === 'idea' && currentStep !== 'processing' && (
           <div className="bg-white rounded-xl shadow-lg p-8 mb-8">
             <h2 className="text-2xl font-semibold mb-6" style={{ color: '#1B1F23' }}>Share Your Business Idea</h2>
             <p className="mb-6" style={{ color: '#202124' }}>Describe what you want to build with AI automation</p>
@@ -262,7 +192,7 @@ function App() {
           </div>
         )}
 
-        {currentStep === 'unit' && (
+        {currentStep === 'unit' && currentStep !== 'processing' && (
           <div className="bg-white rounded-xl shadow-lg p-8 mb-8">
             <h2 className="text-2xl font-semibold mb-6" style={{ color: '#1B1F23' }}>Define Unit of Work</h2>
             <p className="mb-6" style={{ color: '#202124' }}>What constitutes one unit of work in your business?</p>
@@ -284,7 +214,7 @@ function App() {
           </div>
         )}
 
-        {currentStep === 'count' && (
+        {currentStep === 'count' && currentStep !== 'processing' && (
           <div className="bg-white rounded-xl shadow-lg p-8 mb-8">
             <h2 className="text-2xl font-semibold mb-6" style={{ color: '#1B1F23' }}>Monthly Volume</h2>
             <p className="mb-6" style={{ color: '#202124' }}>How many of these units per month?</p>
